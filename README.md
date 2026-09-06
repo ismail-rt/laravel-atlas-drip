@@ -58,45 +58,27 @@ In production, this pattern causes **6 critical failures**:
 
 ```mermaid
 flowchart TD
-    Start(["⏰ Cron / Scheduler: php artisan drip:send"]) --> Chunk["Fetch Recipients in Chunks: chunkById(100)"]
+    Start(["⏰ Cron: php artisan drip:send"]) --> OptCheck{"1. Opted Out?"}
 
-    subgraph RecipientPipeline["Recipient Evaluation Pipeline"]
-        direction TB
-        OptCheck{"Opted Out?<br/>marketing_emails_opted_out_at"}
-        OptCheck -->|"Yes"| SkipOptOut["🚫 Skip Recipient<br/>Cancel active states"]
-        OptCheck -->|"No"| CooldownCheck{"In 48h Cooldown?<br/>Any email sent recently?"}
+    OptCheck -->|"Yes"| SkipOpt["🚫 Skip Recipient<br/>(Opt-Out Ledger Active)"]
+    OptCheck -->|"No"| CoolCheck{"2. In 48h Cooldown?"}
 
-        CooldownCheck -->|"Yes"| SkipCooldown["🛑 Skip Recipient<br/>Protect inbox from multi-campaign flood"]
-        CooldownCheck -->|"No"| PriorityLoop["Iterate Campaigns by Priority<br/>10 (Onboarding) ➔ 20 (Win-back)"]
+    CoolCheck -->|"Yes"| SkipCool["🛑 Pause Delivery<br/>(Cross-Campaign Flood Guard)"]
+    CoolCheck -->|"No"| EnrollCheck{"3. Qualifies for Enrollment?"}
 
-        subgraph CampaignEval["Campaign Evaluation (Priority Order)"]
-            StateCheck{"Active State Exists?"}
+    EnrollCheck -->|"Exceeds Max Age"| SkipEnroll["🛡️ Reject Enrollment<br/>(First-Deploy Blast Guard)"]
+    EnrollCheck -->|"Active / Enrolled"| GoalCheck{"4. Goal Reached?"}
 
-            StateCheck -->|"No"| HistCutoff{"Anchor Before Cutoff<br/>or Max Age Exceeded?"}
-            HistCutoff -->|"Yes"| RejectEnroll["Skip Enrollment<br/>Prevents first-deploy blast"]
-            HistCutoff -->|"No"| Enroll["Create State: active<br/>anchor_at = reference clock"]
+    GoalCheck -->|"Yes (cancelWhen)"| CancelState["🎯 Cancel Campaign<br/>(Terminal State: No Zombies)"]
+    GoalCheck -->|"No"| TimingCheck{"5. Step Due? (Two-Clock)"}
 
-            StateCheck -->|"Yes"| GoalCheck{"Goal Reached?<br/>cancelWhen() == true"}
-            GoalCheck -->|"Yes"| CancelState["Mark State: cancelled<br/>Terminal state (never restarts)"]
-            GoalCheck -->|"No"| NextStep["Resolve Next Step in Sequence"]
+    TimingCheck -->|"Not Yet"| WaitTiming["⏳ Wait for Due Date<br/>(Jitter & Lag Guard)"]
+    TimingCheck -->|"Due"| DedupeTx{"6. Atomic DB Deduplication"}
 
-            Enroll --> NextStep
-            NextStep --> TimingCheck{"Is Step Due?<br/>Two-Clock Formula"}
-            TimingCheck -->|"No"| NextCampaign["Wait for due date<br/>Check next campaign"]
-            TimingCheck -->|"Yes"| AtomicTx["⚡ Atomic Dedupe Transaction<br/>INSERT INTO lad_notification_logs"]
+    DedupeTx -->|"Key Exists (Race)"| SkipRace["⚡ Skip Silently<br/>(Zero Double-Sends)"]
+    DedupeTx -->|"Lock Acquired"| Dispatch["📨 Dispatch Notification / Mailable"]
 
-            AtomicTx --> UniqueViolation{"Unique Key Collision?"}
-            UniqueViolation -->|"Yes (Race Condition)"| Rollback["Rollback DB Tx<br/>Skip silently (zero double-sends)"]
-            UniqueViolation -->|"No"| Dispatch["📨 Dispatch Notification / Mailable"]
-            Dispatch --> UpdateState["Update State<br/>last_step, last_sent_at"]
-            UpdateState --> TerminalCheck{"Was Last Step?"}
-            TerminalCheck -->|"Yes"| MarkCompleted["Mark State: completed"]
-            TerminalCheck -->|"No"| SingleSendExit["🏁 Single Send Limit Reached<br/>Stop evaluation for this recipient"]
-            MarkCompleted --> SingleSendExit
-        end
-    end
-
-    Chunk --> RecipientPipeline
+    Dispatch --> StateUpdate["Advance Campaign State<br/>(Record step & timestamp)"]
 ```
 
 ---
