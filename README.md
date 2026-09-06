@@ -1,4 +1,4 @@
-# Laravel Atlas Drip (`lad`)
+# Laravel Atlas Drip
 
 [![Latest Version on Packagist](https://img.shields.io/packagist/v/ismail-rt/laravel-atlas-drip.svg?style=flat-square)](https://packagist.org/packages/ismail-rt/laravel-atlas-drip)
 [![Total Downloads](https://img.shields.io/packagist/dt/ismail-rt/laravel-atlas-drip.svg?style=flat-square)](https://packagist.org/packages/ismail-rt/laravel-atlas-drip)
@@ -16,7 +16,7 @@ Built for Laravel SaaS developers, indie hackers, and engineering teams needing 
 ## Table of Contents
 
 - [The Problem: Why Naive Drip Logic Fails](#the-problem-why-naive-drip-logic-fails)
-- [How LAD Solves It (Architecture & Flow)](#how-lad-solves-it-architecture--flow)
+- [How Laravel Atlas Drip Solves It (Architecture & Flow)](#how-laravel-atlas-drip-solves-it-architecture--flow)
 - [Campaign State Machine](#campaign-state-machine)
 - [The Two-Clock Formula](#the-two-clock-formula)
 - [Signed Unsubscribe Flow](#signed-unsubscribe-flow)
@@ -52,58 +52,73 @@ In production, this pattern causes **6 critical failures**:
 
 ---
 
-## How LAD Solves It (Architecture & Flow)
+## How Laravel Atlas Drip Solves It (Architecture & Flow)
 
-LAD evaluates recipients through a strict **State Machine + Atomic Deduplication + Two-Clock Pipeline**:
+**Laravel Atlas Drip** evaluates recipients through a strict **State Machine + Atomic Deduplication + Two-Clock Pipeline**:
+
+<p align="center">
+  <img src="docs/images/architecture-flow.svg" alt="Laravel Atlas Drip Architecture Flow" width="100%">
+</p>
+
+<details>
+<summary><b>View Mermaid Flowchart Definition</b></summary>
 
 ```mermaid
 flowchart TD
-    Start(["⏰ Cron / Scheduler<br/><code>php artisan lad:send</code>"]) --> Chunk["Fetch Recipients in Chunks<br/><code>chunkById(100)</code>"]
+    Start(["⏰ Cron / Scheduler: php artisan drip:send"]) --> Chunk["Fetch Recipients in Chunks: chunkById(100)"]
 
     subgraph RecipientPipeline["Recipient Evaluation Pipeline"]
         direction TB
-        OptCheck{"Opted Out?<br/><code>marketing_emails_opted_out_at</code>"}
-        OptCheck -->|Yes| SkipOptOut["🚫 Skip Recipient<br/><i>Cancel active states</i>"]
-        OptCheck -->|No| CooldownCheck{"In 48h Cooldown?<br/><i>Any lifecycle email sent recently?</i>"}
+        OptCheck{"Opted Out?<br/>marketing_emails_opted_out_at"}
+        OptCheck -->|"Yes"| SkipOptOut["🚫 Skip Recipient<br/>Cancel active states"]
+        OptCheck -->|"No"| CooldownCheck{"In 48h Cooldown?<br/>Any email sent recently?"}
 
-        CooldownCheck -->|Yes| SkipCooldown["🛑 Skip Recipient<br/><i>Protect inbox from multi-campaign flood</i>"]
-        CooldownCheck -->|No| PriorityLoop["Iterate Campaigns by Priority<br/><code>10 (Onboarding) ➔ 20 (Win-back)</code>"]
+        CooldownCheck -->|"Yes"| SkipCooldown["🛑 Skip Recipient<br/>Protect inbox from multi-campaign flood"]
+        CooldownCheck -->|"No"| PriorityLoop["Iterate Campaigns by Priority<br/>10 (Onboarding) ➔ 20 (Win-back)"]
 
         subgraph CampaignEval["Campaign Evaluation (Priority Order)"]
-            StateCheck{"Active State<br/>Exists?"}
+            StateCheck{"Active State Exists?"}
 
-            StateCheck -->|No| HistCutoff{"Anchor &lt; Cutoff<br/>or Max Age Exceeded?"}
-            HistCutoff -->|Yes| RejectEnroll["Skip Enrollment<br/><i>Prevents first-deploy blast</i>"]
-            HistCutoff -->|No| Enroll["Create State: <b>active</b><br/><code>anchor_at = reference clock</code>"]
+            StateCheck -->|"No"| HistCutoff{"Anchor Before Cutoff<br/>or Max Age Exceeded?"}
+            HistCutoff -->|"Yes"| RejectEnroll["Skip Enrollment<br/>Prevents first-deploy blast"]
+            HistCutoff -->|"No"| Enroll["Create State: active<br/>anchor_at = reference clock"]
 
-            StateCheck -->|Yes| GoalCheck{"Goal Reached?<br/><code>cancelWhen() == true</code>"}
-            GoalCheck -->|Yes| CancelState["Mark State: <b>cancelled</b><br/><i>Terminal state (never restarts)</i>"]
-            GoalCheck -->|No| NextStep["Resolve Next Step in Sequence"]
+            StateCheck -->|"Yes"| GoalCheck{"Goal Reached?<br/>cancelWhen() == true"}
+            GoalCheck -->|"Yes"| CancelState["Mark State: cancelled<br/>Terminal state (never restarts)"]
+            GoalCheck -->|"No"| NextStep["Resolve Next Step in Sequence"]
 
             Enroll --> NextStep
-            NextStep --> TimingCheck{"Is Step Due?<br/><code>Two-Clock Formula</code>"}
-            TimingCheck -->|No| NextCampaign["Wait for due date<br/><i>Check next campaign</i>"]
-            TimingCheck -->|Yes| AtomicTx["⚡ <b>Atomic Dedupe Transaction</b><br/><code>INSERT INTO lad_notification_logs</code>"]
+            NextStep --> TimingCheck{"Is Step Due?<br/>Two-Clock Formula"}
+            TimingCheck -->|"No"| NextCampaign["Wait for due date<br/>Check next campaign"]
+            TimingCheck -->|"Yes"| AtomicTx["⚡ Atomic Dedupe Transaction<br/>INSERT INTO lad_notification_logs"]
 
-            AtomicTx --> UniqueViolation{"Unique Key<br/>Collision?"}
-            UniqueViolation -->|Yes (Race Condition)| Rollback["Rollback DB Tx<br/><i>Skip silently (zero double-sends)</i>"]
-            UniqueViolation -->|No| Dispatch["📨 <b>Dispatch Notification / Mailable</b>"]
-            Dispatch --> UpdateState["Update State<br/><code>last_step</code>, <code>last_sent_at</code>"]
+            AtomicTx --> UniqueViolation{"Unique Key Collision?"}
+            UniqueViolation -->|"Yes (Race Condition)"| Rollback["Rollback DB Tx<br/>Skip silently (zero double-sends)"]
+            UniqueViolation -->|"No"| Dispatch["📨 Dispatch Notification / Mailable"]
+            Dispatch --> UpdateState["Update State<br/>last_step, last_sent_at"]
             UpdateState --> TerminalCheck{"Was Last Step?"}
-            TerminalCheck -->|Yes| MarkCompleted["Mark State: <b>completed</b>"]
-            TerminalCheck -->|No| SingleSendExit["🏁 <b>Single Send Limit Reached</b><br/><i>Stop evaluation for this recipient</i>"]
+            TerminalCheck -->|"Yes"| MarkCompleted["Mark State: completed"]
+            TerminalCheck -->|"No"| SingleSendExit["🏁 Single Send Limit Reached<br/>Stop evaluation for this recipient"]
             MarkCompleted --> SingleSendExit
         end
     end
 
     Chunk --> RecipientPipeline
 ```
+</details>
 
 ---
 
 ## Campaign State Machine
 
 Each recipient journey is tracked as an explicit, tamper-proof state machine stored in `lad_campaign_states`:
+
+<p align="center">
+  <img src="docs/images/state-machine.svg" alt="Campaign State Machine" width="100%">
+</p>
+
+<details>
+<summary><b>View Mermaid State Machine Definition</b></summary>
 
 ```mermaid
 stateDiagram-v2
@@ -120,6 +135,7 @@ stateDiagram-v2
         or restart, preventing zombie emails.
     end note
 ```
+</details>
 
 - **`active`**: The recipient is moving through sequential steps.
 - **`completed`**: All configured steps have been successfully dispatched.
@@ -129,25 +145,33 @@ stateDiagram-v2
 
 ## The Two-Clock Formula
 
-When evaluating whether sequential step $N$ is due, LAD computes:
+When evaluating whether sequential step $N$ is due, the engine computes:
 
 $$\text{due\_at} = \max(\text{anchor\_at} + \text{offset},\; \text{previous\_step.sent\_at} + \text{minimum\_gap})$$
+
+<p align="center">
+  <img src="docs/images/two-clock-algorithm.svg" alt="Two-Clock Timing Formula vs Naive Cron" width="100%">
+</p>
+
+<details>
+<summary><b>View Mermaid Timeline Definition</b></summary>
 
 ```mermaid
 flowchart LR
     subgraph ScenarioA["Scenario A: Normal Flow (No Queue Lag)"]
         direction TB
         A1["Day 0: Anchor Verified"] --> A2["Day 3: Step 1 Sent"]
-        A2 -->|Minimum Gap: 2 Days| A3["Day 5: Step 2 Due & Sent"]
+        A2 -->|"Minimum Gap: 2 Days"| A3["Day 5: Step 2 Due & Sent"]
     end
 
     subgraph ScenarioB["Scenario B: Cron Delay / Queue Lag (Jitter Protection)"]
         direction TB
         B1["Day 0: Anchor Verified"] --> B2["Day 4: Step 1 Sent (1 Day Late)"]
-        B2 -.->|"❌ Naive Cron would send immediately on Day 5"| B_Bad["Day 5: Back-to-Back Inbox Bombing!"]
-        B2 ==>|"✅ LAD Two-Clock: max(Day 5, Day 4 + 2d) = Day 6"| B3["Day 6: Step 2 Safely Sent with Proper Gap"]
+        B2 -.->|"Naive Cron sends immediately on Day 5"| B_Bad["Day 5: Back-to-Back Inbox Bombing!"]
+        B2 -->|"Two-Clock Engine: max(Day 5, Day 4 + 2d) = Day 6"| B3["Day 6: Step 2 Safely Sent with Proper Gap"]
     end
 ```
+</details>
 
 *Why this matters:* If Day 3 email sends on Day 4 due to a queue outage, and Day 5 has a `minimumGapDays(2)`, Step 2 will **not** send on Day 5. It automatically waits until at least Day 6.
 
@@ -155,13 +179,20 @@ flowchart LR
 
 ## Signed Unsubscribe Flow
 
-LAD isolates marketing opt-outs from transactional emails (invoices, password resets, security alerts) with a built-in cryptographic HMAC flow:
+Laravel Atlas Drip isolates marketing opt-outs from transactional emails (invoices, password resets, security alerts) with a built-in cryptographic HMAC flow:
+
+<p align="center">
+  <img src="docs/images/unsubscribe-flow.svg" alt="Signed Unsubscribe Flow" width="100%">
+</p>
+
+<details>
+<summary><b>View Mermaid Sequence Definition</b></summary>
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor User as User
-    participant App as Laravel App (LAD Engine)
+    participant App as Laravel Application
     participant DB as Database
 
     User->>App: Clicks signed unsubscribe link in email
@@ -175,6 +206,7 @@ sequenceDiagram
         Note over User,App: Critical transactional emails (password reset, billing) remain active!
     end
 ```
+</details>
 
 ---
 
@@ -266,15 +298,19 @@ return [
 
 ## Defining Campaigns
 
-Register campaigns in your `AppServiceProvider` or a dedicated provider using the fluent builder. You can use either `Lad\Facades\Lad` or `Vendor\Lifecycle\Facades\Lifecycle`:
+Register campaigns in your `AppServiceProvider` or a dedicated service provider using the fluent builder. You can import any of the available facades (`Drip`, `Lifecycle`, or `Lad`):
 
 ```php
-use Lad\Facades\Lad;
+use Lad\Facades\Drip;
+// Aliases available:
+// use Lad\Facades\Lifecycle;
+// use Lad\Facades\Lad;
+
 use Lad\Campaign;
 use Lad\Step;
 
 // 1. Onboarding Campaign
-Lad::register(
+Drip::register(
     Campaign::make('onboarding')
         ->priority(10) // Lower number = evaluated first
         // Who qualifies for this campaign?
@@ -306,7 +342,7 @@ Lad::register(
 );
 
 // 2. Recurring Streak Campaign (e.g., Idle Win-Back)
-Lad::register(
+Drip::register(
     Campaign::make('idle_winback')
         ->priority(20)
         ->eligible(fn ($user) => $user->properties()->exists())
@@ -337,40 +373,40 @@ Step::make('welcome_hour2')
 
 ## Artisan Commands
 
-### 1. Dispatch Due Emails (`lad:send`)
+### 1. Dispatch Due Emails (`drip:send` / `lad:send`)
 Schedule this command in `routes/console.php` to run hourly:
 
 ```php
 use Illuminate\Support\Facades\Schedule;
 
-Schedule::command('lad:send')->hourly();
+Schedule::command('drip:send')->hourly();
 ```
 
 Command options:
 
 ```bash
-# Execute standard dispatch run
+# Execute standard dispatch run (any of these aliases works):
+php artisan drip:send
+php artisan lifecycle:send
 php artisan lad:send
 
-# Aliases also supported:
-php artisan lifecycle:send
-php artisan drip:send
-
 # Dry run: preview dispatches without modifying DB or sending emails
-php artisan lad:send --dry-run
+php artisan drip:send --dry-run
 
 # Filter to a specific campaign or recipient
-php artisan lad:send --campaign=onboarding
-php artisan lad:send --recipient=42
+php artisan drip:send --campaign=onboarding
+php artisan drip:send --recipient=42
 ```
 
-### 2. Inspect Recipient Status (`lad:status`)
+### 2. Inspect Recipient Status (`drip:status` / `lad:status`)
 Diagnose recipient eligibility, cooldown window, active campaign states, and upcoming step dates:
 
 ```bash
-php artisan lad:status 42
-# Alias:
+php artisan drip:status 42
+
+# Aliases:
 php artisan lifecycle:status 42
+php artisan lad:status 42
 ```
 
 Example tabular output:
@@ -387,24 +423,26 @@ Status for Recipient #42:
 +------------+---------+---------------------+-----------+-----------+---------------------+---------+
 ```
 
-### 3. Manually Cancel Campaign (`lad:cancel`)
+### 3. Manually Cancel Campaign (`drip:cancel` / `lad:cancel`)
 Manually transition campaign states to `cancelled` for a recipient:
 
 ```bash
 # Cancel all active campaigns for recipient #42
-php artisan lad:cancel 42
+php artisan drip:cancel 42
 
 # Cancel a specific campaign
-php artisan lad:cancel 42 onboarding
-# Alias:
+php artisan drip:cancel 42 onboarding
+
+# Aliases:
 php artisan lifecycle:cancel 42
+php artisan lad:cancel 42
 ```
 
 ---
 
 ## Events & Observability
 
-LAD dispatches standard Laravel events for metrics, analytics, or logging:
+Laravel Atlas Drip dispatches standard Laravel events for metrics, analytics, or logging:
 
 | Event | Dispatched When | Payload |
 | :--- | :--- | :--- |
