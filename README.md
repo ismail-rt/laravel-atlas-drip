@@ -111,9 +111,11 @@ stateDiagram-v2
 
 ## The Two-Clock Formula
 
-When evaluating whether sequential step $N$ is due, the engine computes:
+When evaluating whether a sequential step is due, the engine computes:
 
-$$\text{due\_at} = \max(\text{anchor\_at} + \text{offset},\; \text{previous\_step.sent\_at} + \text{minimum\_gap})$$
+```text
+due_at = max(anchor_at + offset, previous_step_sent_at + minimum_gap)
+```
 
 ```mermaid
 flowchart LR
