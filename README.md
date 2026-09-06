@@ -56,13 +56,6 @@ In production, this pattern causes **6 critical failures**:
 
 **Laravel Atlas Drip** evaluates recipients through a strict **State Machine + Atomic Deduplication + Two-Clock Pipeline**:
 
-<p align="center">
-  <img src="docs/images/architecture-flow.svg" alt="Laravel Atlas Drip Architecture Flow" width="100%">
-</p>
-
-<details>
-<summary><b>View Mermaid Flowchart Definition</b></summary>
-
 ```mermaid
 flowchart TD
     Start(["⏰ Cron / Scheduler: php artisan drip:send"]) --> Chunk["Fetch Recipients in Chunks: chunkById(100)"]
@@ -105,20 +98,12 @@ flowchart TD
 
     Chunk --> RecipientPipeline
 ```
-</details>
 
 ---
 
 ## Campaign State Machine
 
 Each recipient journey is tracked as an explicit, tamper-proof state machine stored in `lad_campaign_states`:
-
-<p align="center">
-  <img src="docs/images/state-machine.svg" alt="Campaign State Machine" width="100%">
-</p>
-
-<details>
-<summary><b>View Mermaid State Machine Definition</b></summary>
 
 ```mermaid
 stateDiagram-v2
@@ -135,7 +120,6 @@ stateDiagram-v2
         or restart, preventing zombie emails.
     end note
 ```
-</details>
 
 - **`active`**: The recipient is moving through sequential steps.
 - **`completed`**: All configured steps have been successfully dispatched.
@@ -148,13 +132,6 @@ stateDiagram-v2
 When evaluating whether sequential step $N$ is due, the engine computes:
 
 $$\text{due\_at} = \max(\text{anchor\_at} + \text{offset},\; \text{previous\_step.sent\_at} + \text{minimum\_gap})$$
-
-<p align="center">
-  <img src="docs/images/two-clock-algorithm.svg" alt="Two-Clock Timing Formula vs Naive Cron" width="100%">
-</p>
-
-<details>
-<summary><b>View Mermaid Timeline Definition</b></summary>
 
 ```mermaid
 flowchart LR
@@ -171,7 +148,6 @@ flowchart LR
         B2 -->|"Two-Clock Engine: max(Day 5, Day 4 + 2d) = Day 6"| B3["Day 6: Step 2 Safely Sent with Proper Gap"]
     end
 ```
-</details>
 
 *Why this matters:* If Day 3 email sends on Day 4 due to a queue outage, and Day 5 has a `minimumGapDays(2)`, Step 2 will **not** send on Day 5. It automatically waits until at least Day 6.
 
@@ -180,13 +156,6 @@ flowchart LR
 ## Signed Unsubscribe Flow
 
 Laravel Atlas Drip isolates marketing opt-outs from transactional emails (invoices, password resets, security alerts) with a built-in cryptographic HMAC flow:
-
-<p align="center">
-  <img src="docs/images/unsubscribe-flow.svg" alt="Signed Unsubscribe Flow" width="100%">
-</p>
-
-<details>
-<summary><b>View Mermaid Sequence Definition</b></summary>
 
 ```mermaid
 sequenceDiagram
@@ -206,7 +175,6 @@ sequenceDiagram
         Note over User,App: Critical transactional emails (password reset, billing) remain active!
     end
 ```
-</details>
 
 ---
 
